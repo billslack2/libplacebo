@@ -1246,7 +1246,7 @@ bool pl_shader_detect_peak(pl_shader sh, struct pl_color_space csp,
     }
 
     const bool use_histogram = params->percentile > 0 && params->percentile < 100;
-    size_t shmem_req = 3 * sizeof(uint32_t);
+    size_t shmem_req = 4 * sizeof(uint32_t);
     if (use_histogram)
         shmem_req += sizeof(uint32_t[HIST_BINS]);
 
@@ -1255,6 +1255,32 @@ bool pl_shader_detect_peak(pl_shader sh, struct pl_color_space csp,
                "for at least %zu bytes of shared memory! (avail: %zu)",
                shmem_req, sh_glsl(sh).max_shmem_size);
         return false;
+    }
+
+    pl_rect2df analysis_crop = params->analysis_crop;
+    const bool use_analysis_crop = analysis_crop.x0 || analysis_crop.y0 ||
+                                   analysis_crop.x1 || analysis_crop.y1;
+    ident_t analysis_pos = NULL_IDENT;
+    if (use_analysis_crop) {
+        pl_rect2df_normalize(&analysis_crop);
+        analysis_crop.x0 = PL_CLAMP(analysis_crop.x0, 0.0f, 1.0f);
+        analysis_crop.y0 = PL_CLAMP(analysis_crop.y0, 0.0f, 1.0f);
+        analysis_crop.x1 = PL_CLAMP(analysis_crop.x1, 0.0f, 1.0f);
+        analysis_crop.y1 = PL_CLAMP(analysis_crop.y1, 0.0f, 1.0f);
+        if (analysis_crop.x0 >= analysis_crop.x1 ||
+            analysis_crop.y0 >= analysis_crop.y1)
+        {
+            PL_ERR(sh, "Invalid peak detection analysis crop: "
+                   "{%f, %f, %f, %f}", params->analysis_crop.x0,
+                   params->analysis_crop.y0, params->analysis_crop.x1,
+                   params->analysis_crop.y1);
+            return false;
+        }
+
+        analysis_pos = sh_attr_vec2(sh, "peak_detect_pos", &(pl_rect2df) {
+            .x1 = 1.0f,
+            .y1 = 1.0f,
+        });
     }
 
     struct sh_color_map_obj *obj;
@@ -1320,11 +1346,13 @@ retry_ssbo:
 
     // For performance, we want to do as few atomic operations on global
     // memory as possible, so use an atomic in shmem for the work group.
-    ident_t wg_sum   = sh_fresh(sh, "wg_sum"),
-            wg_max   = sh_fresh(sh, "wg_max"),
-            wg_black = sh_fresh(sh, "wg_black"),
-            wg_hist  = NULL_IDENT;
-    GLSLH("shared uint "$", "$", "$"; \n", wg_sum, wg_max, wg_black);
+    ident_t wg_sum      = sh_fresh(sh, "wg_sum"),
+            wg_max      = sh_fresh(sh, "wg_max"),
+            wg_black    = sh_fresh(sh, "wg_black"),
+            wg_excluded = sh_fresh(sh, "wg_excluded"),
+            wg_hist     = NULL_IDENT;
+    GLSLH("shared uint "$", "$", "$", "$"; \n", wg_sum, wg_max,
+          wg_black, wg_excluded);
     if (use_histogram) {
         wg_hist = sh_fresh(sh, "wg_hist");
         GLSLH("shared uint "$"[%u]; \n", wg_hist, HIST_BINS);
@@ -1340,7 +1368,7 @@ retry_ssbo:
     const uint hist_base = slice * ${const uint: HIST_BINS};                    \
     const vec4 color_orig = color;                                              \
     if (local_idx == 0u)                                                        \
-        $wg_sum = $wg_max = $wg_black = 0u;                                     \
+        $wg_sum = $wg_max = $wg_black = $wg_excluded = 0u;                      \
     @if (use_histogram) {                                                       \
         for (uint i = local_idx; i < ${const uint: HIST_BINS}; i += wg_size)    \
             $wg_hist[i] = 0u;                                                   \
@@ -1363,6 +1391,18 @@ retry_ssbo:
     @if (cutoff)                                                                \
         luma *= smoothstep(0.0, ${float: cutoff}, luma);                        \
     uint y_pq = uint(${const float: PQ_MAX} * luma);                            \
+    bool analysis_sample = true;                                                \
+    @if (use_analysis_crop) {                                                   \
+        analysis_sample =                                                       \
+            $analysis_pos.x >= ${float: analysis_crop.x0} &&                    \
+            $analysis_pos.x <  ${float: analysis_crop.x1} &&                    \
+            $analysis_pos.y >= ${float: analysis_crop.y0} &&                    \
+            $analysis_pos.y <  ${float: analysis_crop.y1};                      \
+    @}                                                                          \
+    bool eligible = analysis_sample;                                            \
+    @if (cutoff)                                                                \
+        eligible = eligible && y_pq != 0u;                                      \
+    const uint sample_pq = eligible ? y_pq : 0u;                                \
                                                                                 \
     /* Update the work group's shared atomics */                                \
     @if (use_histogram) {                                                       \
@@ -1370,44 +1410,42 @@ retry_ssbo:
         bin -= ${const int: HIST_BIAS};                                         \
         bin = clamp(bin, 0, ${const int: HIST_BINS - 1});                       \
         @if (has_subgroups) {                                                   \
+            uvec4 e = subgroupBallot(eligible);                                 \
             /* Optimize for the very common case of identical histogram bins */ \
             if (subgroupAllEqual(bin)) {                                        \
                 if (subgroupElect())                                            \
-                    atomicAdd($wg_hist[bin], gl_SubgroupSize);                  \
-            } else {                                                            \
+                    atomicAdd($wg_hist[bin], subgroupBallotBitCount(e));         \
+            } else if (eligible) {                                              \
                 atomicAdd($wg_hist[bin], 1u);                                   \
             }                                                                   \
         @} else {                                                               \
-            atomicAdd($wg_hist[bin], 1u);                                       \
+            if (eligible)                                                       \
+                atomicAdd($wg_hist[bin], 1u);                                   \
         @}                                                                      \
     @}                                                                          \
                                                                                 \
     @if (has_subgroups) {                                                       \
-        uint group_sum = subgroupAdd(y_pq);                                     \
-        uint group_max = subgroupMax(y_pq);                                     \
-        @if (cutoff)                                                            \
-            uvec4 b = subgroupBallot(y_pq == 0u);                               \
+        uint group_sum = subgroupAdd(sample_pq);                                \
+        uint group_max = subgroupMax(sample_pq);                                \
+        uvec4 b = subgroupBallot(analysis_sample && !eligible);                 \
+        uvec4 e = subgroupBallot(!analysis_sample);                             \
         if (subgroupElect()) {                                                  \
             atomicAdd($wg_sum, group_sum);                                      \
             atomicMax($wg_max, group_max);                                      \
-            @if (cutoff)                                                        \
-                atomicAdd($wg_black, subgroupBallotBitCount(b));                \
+            atomicAdd($wg_black, subgroupBallotBitCount(b));                    \
+            atomicAdd($wg_excluded, subgroupBallotBitCount(e));                 \
         }                                                                       \
     @} else {                                                                   \
-        atomicAdd($wg_sum, y_pq);                                               \
-        atomicMax($wg_max, y_pq);                                               \
-        @if (cutoff) {                                                          \
-            if (y_pq == 0u)                                                     \
-                atomicAdd($wg_black, 1u);                                       \
-        @}                                                                      \
+        atomicAdd($wg_sum, sample_pq);                                          \
+        atomicMax($wg_max, sample_pq);                                          \
+        if (!analysis_sample)                                                   \
+            atomicAdd($wg_excluded, 1u);                                        \
+        else if (!eligible)                                                     \
+            atomicAdd($wg_black, 1u);                                           \
     @}                                                                          \
     barrier();                                                                  \
                                                                                 \
     @if (use_histogram) {                                                       \
-        @if (cutoff) {                                                          \
-            if (gl_LocalInvocationIndex == 0u)                                  \
-                $wg_hist[0] -= $wg_black;                                       \
-        @}                                                                      \
         /* Update the histogram with a cooperative loop */                      \
         for (uint i = local_idx; i < ${const uint: HIST_BINS}; i += wg_size)    \
             atomicAdd(frame_hist[hist_base + i], $wg_hist[i]);                  \
@@ -1415,8 +1453,9 @@ retry_ssbo:
                                                                                 \
     /* Have one thread per work group update the global atomics */              \
     if (gl_LocalInvocationIndex == 0u) {                                        \
-        uint num = wg_size - $wg_black;                                         \
-        atomicAdd(frame_wg_count[slice], 1u);                                   \
+        uint analyzed = wg_size - $wg_excluded;                                 \
+        uint num = analyzed - $wg_black;                                        \
+        atomicAdd(frame_wg_count[slice], min(analyzed, 1u));                    \
         atomicAdd(frame_wg_active[slice], min(num, 1u));                        \
         if (num > 0u) {                                                         \
             atomicAdd(frame_sum_pq[slice], $wg_sum / num);                      \
