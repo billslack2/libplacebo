@@ -688,10 +688,53 @@ static void pl_shader_tests(pl_gpu gpu)
         real_avg = real_avg / (FBO_W * FBO_H);
         REQUIRE_FEQ(hdr.max_pq_y, real_peak, 1e-4);
         REQUIRE_FEQ(hdr.avg_pq_y, real_avg,  1e-3);
+        const float full_peak = real_peak;
+        const float full_avg = real_avg;
+
+        // Restrict detection to the left half and verify that pixels outside
+        // the crop contribute to neither the maximum nor the average.
+        peak_params.analysis_crop = (pl_rect2df) { 0.0f, 0.0f, 0.5f, 1.0f };
+        sh = pl_dispatch_begin(dp);
+        pl_shader_sample_nearest(sh, pl_sample_src( .tex = src ));
+        REQUIRE(pl_shader_detect_peak(sh, csp_gamma22, &peak_state, &peak_params));
+        REQUIRE(pl_dispatch_compute(dp, &(struct pl_dispatch_compute_params) {
+            .shader = &sh,
+            .width = fbo->params.w,
+            .height = fbo->params.h,
+        }));
+        REQUIRE(pl_get_detected_hdr_metadata(peak_state, &hdr));
+
+        real_peak = 0;
+        real_avg = 0;
+        int crop_pixels = 0;
+        for (int y = 0; y < FBO_H; y++) {
+            for (int x = 0; x < FBO_W / 2; x++) {
+                float *color = &src_data[(y * FBO_W + x) * 4];
+                float luma = 0.212639f * powf(color[0], 2.2f) +
+                             0.715169f * powf(color[1], 2.2f) +
+                             0.072192f * powf(color[2], 2.2f);
+                luma = pl_hdr_rescale(PL_HDR_NORM, PL_HDR_PQ, luma);
+                real_peak = PL_MAX(real_peak, luma);
+                real_avg += luma;
+                crop_pixels++;
+            }
+        }
+        real_avg /= crop_pixels;
+        REQUIRE_FEQ(hdr.max_pq_y, real_peak, 1e-4);
+        // The CPU reference omits the small decoded-RGB black-level
+        // normalization performed by the shader, which is more visible for
+        // this darker half of the test pattern.
+        REQUIRE_FEQ(hdr.avg_pq_y, real_avg,  2e-3);
+        printf("- peak analysis crop: full max/avg %.6f/%.6f, "
+               "left-half detected max/avg %.6f/%.6f, reference %.6f/%.6f\n",
+               full_peak, full_avg, hdr.max_pq_y, hdr.avg_pq_y,
+               real_peak, real_avg);
     }
 
     pl_dispatch_abort(dp, &sh);
     pl_shader_obj_destroy(&peak_state);
+    if (getenv("PL_TEST_PEAK_ANALYSIS_CROP_ONLY"))
+        goto cleanup;
 
     // Test film grain synthesis
     pl_shader_obj grain = NULL;
@@ -810,6 +853,7 @@ static void pl_shader_tests(pl_gpu gpu)
         }
     }
 
+cleanup:
     pl_dispatch_destroy(&dp);
     pl_tex_destroy(gpu, &src);
     pl_tex_destroy(gpu, &fbo);
@@ -1742,6 +1786,12 @@ static void pl_test_host_ptr(pl_gpu gpu)
 
 void gpu_shader_tests(pl_gpu gpu)
 {
+    if (getenv("PL_TEST_PEAK_ANALYSIS_CROP_ONLY")) {
+        pl_shader_tests(gpu);
+        REQUIRE(!pl_gpu_is_failed(gpu));
+        return;
+    }
+
     pl_buffer_tests(gpu);
     pl_texture_tests(gpu);
     pl_planar_tests(gpu);

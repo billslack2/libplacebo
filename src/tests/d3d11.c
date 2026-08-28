@@ -7,6 +7,8 @@
 int main()
 {
     pl_log log = pl_test_logger();
+    if (getenv("PL_TEST_PEAK_ANALYSIS_CROP_ONLY"))
+        pl_log_level_update(log, PL_LOG_WARN);
     IDXGIFactory1 *factory = NULL;
     IDXGIAdapter1 *adapter1 = NULL;
     HRESULT hr;
