@@ -44,7 +44,7 @@ void pl_d3d11_timer_start(pl_gpu gpu, pl_timer timer)
     struct pl_gpu_d3d11 *p = PL_PRIV(gpu);
     struct d3d11_ctx *ctx = p->ctx;
 
-    if (!timer)
+    if (!timer || p->timer_queries_suspended)
         return;
     struct timer_query *query = &timer->queries[timer->current];
 
@@ -80,7 +80,7 @@ void pl_d3d11_timer_end(pl_gpu gpu, pl_timer timer)
 {
     struct pl_gpu_d3d11 *p = PL_PRIV(gpu);
 
-    if (!timer)
+    if (!timer || p->timer_queries_suspended)
         return;
     struct timer_query *query = &timer->queries[timer->current];
 
@@ -116,6 +116,9 @@ static uint64_t d3d11_timer_query(pl_gpu gpu, pl_timer timer)
     struct pl_gpu_d3d11 *p = PL_PRIV(gpu);
     struct d3d11_ctx *ctx = p->ctx;
     HRESULT hr;
+
+    if (p->timer_queries_suspended)
+        return 0;
 
     for (; timer->pending > 0; timer->pending--) {
         int index = timer->current - timer->pending;
@@ -179,17 +182,20 @@ static void d3d11_timer_destroy(pl_gpu gpu, pl_timer timer)
 
     pl_d3d11_flush_message_queue(ctx, "After timer destroy");
 
+    pl_assert(p->live_timers > 0);
+    p->live_timers--;
     pl_free(timer);
 }
 
 static pl_timer d3d11_timer_create(pl_gpu gpu)
 {
     struct pl_gpu_d3d11 *p = PL_PRIV(gpu);
-    if (!p->has_timestamp_queries)
+    if (!p->has_timestamp_queries || !p->timer_queries_enabled)
         return NULL;
 
     struct pl_timer_t *timer = pl_alloc_ptr(NULL, timer);
     *timer = (struct pl_timer_t) {0};
+    p->live_timers++;
     return timer;
 }
 
@@ -317,6 +323,29 @@ pl_d3d11 pl_d3d11_get(pl_gpu gpu)
     }
 
     return NULL;
+}
+
+bool pl_d3d11_set_timer_queries_enabled(pl_d3d11 d3d11, bool enabled)
+{
+    if (!d3d11 || !d3d11->gpu)
+        return false;
+
+    struct pl_gpu_d3d11 *p = PL_PRIV(d3d11->gpu);
+    if (p->live_timers)
+        return false;
+
+    p->timer_queries_enabled = enabled;
+    return true;
+}
+
+bool pl_d3d11_set_timer_queries_suspended(pl_d3d11 d3d11, bool suspended)
+{
+    if (!d3d11 || !d3d11->gpu)
+        return false;
+
+    struct pl_gpu_d3d11 *p = PL_PRIV(d3d11->gpu);
+    p->timer_queries_suspended = suspended;
+    return true;
 }
 
 static bool load_d3d_compiler(pl_gpu gpu)
@@ -464,6 +493,8 @@ pl_gpu pl_gpu_create_d3d11(struct d3d11_ctx *ctx,
         .ctx = ctx,
         .impl = pl_fns_d3d11,
         .dev = ctx->dev,
+        .timer_queries_enabled = true,
+        .timer_queries_suspended = false,
         .spirv = pl_spirv_create(ctx->log, (struct pl_spirv_version) {
             .env_version = pl_spirv_version_to_vulkan(spirv_ver),
             .spv_version = spirv_ver,
