@@ -879,7 +879,7 @@ static void pl_shader_tests(pl_gpu gpu)
     }
 
     // VP comparison is opt-in. Original/custom/original must restore exact
-    // output while reusing tone and color-volume LUT state.
+    // output while reusing the original tone/gamut state.
     {
         pl_shader_obj tone_state = NULL;
         struct pl_color_space source = pl_color_space_hdr10;
@@ -926,7 +926,7 @@ static void pl_shader_tests(pl_gpu gpu)
         for (int i = 0; i < PL_ARRAY_SIZE(test_data); i++)
             difference = PL_MAX(difference, fabsf(on_data[i] - off_data[i]));
         REQUIRE(difference > 1e-4f);
-        printf("- VP original/custom output difference: %f\n", difference);
+        printf("- VP original/overflow-correction output difference: %f\n", difference);
         pl_shader_obj_destroy(&tone_state);
         pl_tex_destroy(gpu, &feature);
     }

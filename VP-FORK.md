@@ -15,18 +15,27 @@ VP patches:
 
 - `pl_color_map_params.vp_gamut_compression` / `vp_gamut_compression=yes|no`.
   Defaults to disabled: the original master mapping path is unchanged. When
-  enabled during HDR compression, a physical-output color-volume LUT replaces
-  the gamut stage after the existing tone/film response. Four filtered samples
-  per pixel; lookup tables are reused in shader state while physical target
-  primaries/black/peak stay unchanged. Alpha is preserved. Dynamic target and
-  tone curve choices remain independent.
-  The experimental shoulder holds IPT hue approximately, protects midtones,
-  gradually compresses chroma, and rolls luminance off near display peak.
-  LUT RGB entries stay inside the target cube; trilinear interpolation is
-  convex. The Y dimension is interpolated explicitly to avoid the hardware
-  texture interpolator's limited fractional precision causing ramp reversals.
-  It is a viewing experiment, pending real-scene, temporal and performance
-  qualification. It does not govern later calibration/custom LUT output.
+  enabled during tone mapping (excluding inverse tone mapping), a continuous
+  residual correction follows the complete selected original gamut stage.
+  Physical target RGB is normalized by its nominal black and peak. Positive
+  overflow uses a common gain with a saturation-dependent 2% shoulder reserve;
+  negative channels receive a common neutral lift with a continuous cap at the
+  positive original luminance. This avoids creating light from negative-Y input.
+  Legal interior pixels bypass the additional transform exactly. Near-boundary
+  saturated colors may move by up to about 0.586% of target range. Color and
+  brightness tradeoffs remain, particularly for negative-channel blues.
+  This replaces the earlier fixed-Y color-volume LUT experiment. No additional
+  texture/LUT or environment switch is used; original gamut choices remain active.
+  Physical P3 inside a BT.2020 signal container is handled with explicit matrices.
+  Alpha, tone curve and dynamic-target controls remain independent. The option
+  does not govern later calibration/custom LUT output. Default-on, real-content,
+  temporal, physical swapchain/dither and performance qualification remain open.
+
+  Research validation: 105 matched D3D11 linear cases at 50/100/500 nits plus
+  nine actual PQ-output controls; exact original/off restoration, no material
+  target-bound violations or nominal exposure-Y reversals. Source-code-neighbor
+  and negative-luminance controls are included. Small GPU floating-point errors
+  require a numerical tolerance; these results are not a universal quality claim.
 
 Sibling branch `codex/vp-release-7.360.1` reconstructs the full shipped release
 source (analysis crop plus timers); the VP stable binary remains unchanged.

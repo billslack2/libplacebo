@@ -16,11 +16,9 @@
  */
 
 #include <math.h>
-#include <stdlib.h>
 
 #include "cache.h"
 #include "colorspace.h"
-#include "color_volume.h"
 #include "shaders.h"
 
 #include <libplacebo/shaders/colorspace.h>
@@ -1098,7 +1096,6 @@ struct sh_color_map_obj {
         pl_shader_obj lut;
     } gamut;
 
-    pl_shader_obj vp_volume_lut;
 
     // Peak detection state
     struct {
@@ -1134,7 +1131,6 @@ static void sh_color_map_uninit(pl_gpu gpu, void *ptr)
     struct sh_color_map_obj *obj = ptr;
     pl_shader_obj_destroy(&obj->tone.lut);
     pl_shader_obj_destroy(&obj->gamut.lut);
-    pl_shader_obj_destroy(&obj->vp_volume_lut);
     pl_buf_destroy(gpu, &obj->peak.buf);
     pl_buf_destroy(gpu, &obj->peak.readback);
     memset(obj, 0, sizeof(*obj));
@@ -1898,11 +1894,7 @@ static void fill_gamut_lut(void *data, const struct sh_lut_params *params)
     pl_free(tmp);
 }
 
-static void fill_vp_volume(void *data, const struct sh_lut_params *params)
-{
-    struct vp_color_volume *p=params->priv;
-    p->failed=!vp_color_volume_generate(data,p);
-}
+
 
 void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *params,
                             const struct pl_color_map_args *args)
@@ -2149,9 +2141,7 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
 
     bool need_tone_map = !pl_tone_map_params_noop(&tone) ||
                          dt_exposure != 1.0f;
-    const bool vp_volume = params->vp_gamut_compression && obj && need_tone_map &&
-        !params->inverse_tone_mapping && tone.input_max > gamut.max_luma + 1e-4f;
-    bool need_gamut_map = !vp_volume && !pl_gamut_map_params_noop(&gamut);
+    bool need_gamut_map = !pl_gamut_map_params_noop(&gamut);
 
     if (!args->prelinearized)
         pl_shader_linearize(sh, &src);
@@ -2453,70 +2443,10 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
          10000 / PL_COLOR_SDR_WHITE,
          SH_MAT3(lms2rgb));
 
-    if (vp_volume) {
-        struct vp_color_volume volume={
-            .prim=*pl_raw_primaries_get(dst.primaries),
-        };
-        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-            .color=&dst, .metadata=PL_HDR_METADATA_HDR10, .scaling=PL_HDR_NITS,
-            .out_min=&volume.black, .out_max=&volume.peak));
-        volume.black=pl_signal_black(volume.black,PL_HDR_NITS);
-        uint64_t sig=0x5650434f4c564c02ULL;
-        pl_hash_merge(&sig,pl_var_hash(volume.prim));
-        pl_hash_merge(&sig,pl_var_hash(volume.black));
-        pl_hash_merge(&sig,pl_var_hash(volume.peak));
-        pl_fmt fmt=pl_find_fmt(SH_GPU(sh),PL_FMT_FLOAT,4,32,32,PL_FMT_CAP_LINEAR);
-        if (!fmt) { SH_FAIL(sh,"VP color volume requires float32 filtering"); return; }
-        ident_t table=sh_lut(sh,sh_lut_params(
-            .object=&obj->vp_volume_lut, .var_type=PL_VAR_FLOAT,
-            .lut_type=SH_LUT_TEXTURE, .fmt=fmt, .method=SH_LUT_LINEAR,
-            .width=VP_VOLUME_Y, .height=VP_VOLUME_C, .depth=VP_VOLUME_H,
-            .comps=4, .signature=sig,
-            .fill=fill_vp_volume, .priv=&volume));
-        if (!table || volume.failed) {
-            pl_shader_obj_destroy(&obj->vp_volume_lut);
-            SH_FAIL(sh,"Failed generating VP color-volume table"); return;
-        }
-        sh_describe(sh,"VP smooth color-volume compression");
-        pl_matrix3x3 xyz=pl_get_rgb2xyz_matrix(&volume.prim);
-        float sum=xyz.m[1][0]+xyz.m[1][1]+xyz.m[1][2];
-        float black=volume.black/PL_COLOR_SDR_WHITE;
-        float range=(volume.peak-volume.black)/PL_COLOR_SDR_WHITE;
-        GLSL("{ float black = "$", range = "$";                         \n"
-             "  vec3 original = (color.rgb - vec3(black)) / range;        \n"
-             "  float y = dot(original, vec3("$", "$", "$"));                \n"
-             "  float t = max((y - 0.98) / 0.02, 0.0);                   \n"
-             "  float yo = y <= 0.98 ? max(y, 0.0)                      \n"
-             "      : 0.98 + 0.02 * t * inversesqrt(1.0 + t*t);          \n"
-             "  float cell = min(floor(sqrt(yo) * 128.0), 127.0);          \n"
-             "  float y0 = cell*cell/16384.0;                            \n"
-             "  float y1 = (cell+1.0)*(cell+1.0)/16384.0;                \n"
-             "  float uy0 = cell/128.0, uy1 = (cell+1.0)/128.0;               \n"
-             "  float yf = (yo-y0)/(y1-y0); float uh = atan(ipt.z, ipt.y)*%f + 0.5;                 \n"
-             "  float bound = mix("$"(vec3(uy0, 0.0, uh)).a,           \n"
-             "                    "$"(vec3(uy1, 0.0, uh)).a, yf);      \n"
-             "  float x = length(ipt.yz) / max(bound, 1e-9);            \n"
-             "  float u = max((x-0.8)/0.2, 0.0);                       \n"
-             "  float uc = x <= 0.8 ? x                                \n"
-             "      : 0.8 + 0.2*u*inversesqrt(1.0+u*u);                \n"
-             "  vec3 mapped = mix("$"(vec3(uy0, uc, uh)).rgb,           \n"
-             "                    "$"(vec3(uy1, uc, uh)).rgb, yf);     \n"
-             "  bool legal = all(greaterThanEqual(original,vec3(0.0))) \n"
-             "      && all(lessThanEqual(original,vec3(1.0)));          \n"
-             "  float blend = legal && y <= 0.98                      \n"
-             "      ? smoothstep(0.65,0.8,x) : 1.0;                    \n"
-             "  color.rgb = mix(color.rgb,vec3(black)+range*mapped,blend); \n"
-             "}                                                        \n",
-             SH_FLOAT(black),SH_FLOAT(range),SH_FLOAT(xyz.m[1][0]/sum),
-             SH_FLOAT(xyz.m[1][1]/sum),SH_FLOAT(xyz.m[1][2]/sum),0.5f/M_PI,table,table,table,table);
-    }
-
-    // Research-only opt-in: repair residual target-volume overflow after the
-    // original gamut mapping. Keep the original shader byte-for-byte when off.
-    const char *continuous_env = getenv("VP_CONTINUOUS_GAMUT");
-    if (need_tone_map && !params->vp_gamut_compression &&
-        !params->inverse_tone_mapping && continuous_env &&
-        strcmp(continuous_env, "1") == 0)
+    // Correct residual physical-target overflow after the selected original
+    // gamut mapping. The default-off path emits no additional shader code.
+    if (need_tone_map && params->vp_gamut_compression &&
+        !params->inverse_tone_mapping)
     {
         const struct pl_raw_primaries *signal = pl_raw_primaries_get(dst.primaries);
         const struct pl_raw_primaries *physical = &dst.hdr.prim;
@@ -2531,7 +2461,7 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
               xyz.m[1][0] > 0 && xyz.m[1][1] > 0 && xyz.m[1][2] > 0 &&
               isfinite(sum)))
         {
-            SH_FAIL(sh, "Continuous gamut research requires a finite target and positive luminance weights");
+            SH_FAIL(sh, "Gamut overflow correction requires a finite target and positive luminance weights");
             return;
         }
 
@@ -2540,7 +2470,7 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
         pl_matrix3x3_mul(&to_physical, &signal_xyz);
         pl_matrix3x3 to_signal = pl_get_xyz2rgb_matrix(signal);
         pl_matrix3x3_mul(&to_signal, &xyz);
-        sh_describe(sh, "VP continuous target-volume research");
+        sh_describe(sh, "VP gamut overflow correction");
         GLSL("{ vec3 physical = color.rgb; \n");
         if (!same)
             GLSL("physical = "$" * physical; \n", SH_MAT3(to_physical));
