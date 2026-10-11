@@ -66,6 +66,9 @@ struct pl_gpu_d3d11 {
     // Device capabilities
     D3D_FEATURE_LEVEL fl;
     bool has_timestamp_queries;
+    bool timer_queries_enabled;
+    bool timer_queries_suspended;
+    unsigned int live_timers;
     bool has_monitored_fences;
 
     int max_srvs;

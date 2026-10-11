@@ -52,6 +52,21 @@ int main()
         ));
         REQUIRE(d3d11);
 
+        // Applications which own one frame-level disjoint query must be able
+        // to suppress libplacebo's per-pass timers before renderer creation.
+        REQUIRE(pl_d3d11_set_timer_queries_enabled(d3d11, false));
+        REQUIRE(!pl_timer_create(d3d11->gpu));
+        REQUIRE(pl_d3d11_set_timer_queries_enabled(d3d11, true));
+        pl_timer timer = pl_timer_create(d3d11->gpu);
+        REQUIRE(timer);
+        REQUIRE(pl_d3d11_set_timer_queries_suspended(d3d11, true));
+        REQUIRE(pl_d3d11_set_timer_queries_suspended(d3d11, false));
+        REQUIRE(!pl_d3d11_set_timer_queries_enabled(d3d11, false));
+        pl_timer_destroy(d3d11->gpu, &timer);
+        REQUIRE(pl_d3d11_set_timer_queries_enabled(d3d11, false));
+        REQUIRE(!pl_timer_create(d3d11->gpu));
+        REQUIRE(pl_d3d11_set_timer_queries_enabled(d3d11, true));
+
         gpu_shader_tests(d3d11->gpu);
 
         pl_d3d11_destroy(&d3d11);
