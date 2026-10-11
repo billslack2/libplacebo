@@ -2006,7 +2006,7 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
     // linearly: trading some average brightness buys headroom for the tone
     // mapping and the highlights, which gives far better results than
     // compressing e.g. a 10000 nits source directly into a 203 nits target.
-    if (obj && scene_avg > 0 && !params->inverse_tone_mapping &&
+    if (params->dynamic_target && obj && scene_avg > 0 && !params->inverse_tone_mapping &&
         tone.input_max > tone.output_max + 1e-4f)
     {
         // Smooth maximum of the display peak and a fixed perceptual (PQ)

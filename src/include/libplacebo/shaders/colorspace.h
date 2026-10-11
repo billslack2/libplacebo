@@ -331,6 +331,12 @@ struct pl_color_map_params {
     // cost of clipping the brightest compressed highlights. Defaults to 0.3.
     float film_strength; // [0,2]
 
+    // Adapt the virtual tone-mapping target to scene brightness, trading
+    // average brightness for highlight headroom. The physical display peak
+    // remains unchanged. Defaults to true. Requires scene average metadata;
+    // disabling this does not disable peak detection or the film response.
+    bool dynamic_target;
+
     // Tone mapping LUT size. Defaults to 256.
     int lut_size;
 
@@ -383,6 +389,7 @@ struct pl_color_map_params {
     .tone_constants         = { PL_TONE_MAP_CONSTANTS },        \
     .metadata               = PL_HDR_METADATA_ANY,              \
     .mastering_clip         = 1.0f,                             \
+    .dynamic_target         = true,                            \
     .film_strength          = 0.3f,                             \
     .lut3d_size             = {48, 32, 256},                    \
     .lut_size               = 256,                              \

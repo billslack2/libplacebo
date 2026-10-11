@@ -786,6 +786,8 @@ static void pl_shader_tests(pl_gpu gpu)
         REQUIRE_FEQ(hdr.avg_pq_y, real_avg,  1e-3);
         const float full_peak = real_peak;
         const float full_avg = real_avg;
+        const float full_scene_avg = hdr.scene_avg;
+        const float full_scene_max = hdr.scene_max[0];
 
         // Restrict detection to the left half and verify that pixels outside
         // the crop contribute to neither the maximum nor the average.
@@ -803,6 +805,7 @@ static void pl_shader_tests(pl_gpu gpu)
         real_peak = 0;
         real_avg = 0;
         int crop_pixels = 0;
+        float crop_scene_avg = 0, crop_scene_max = 0;
         for (int y = 0; y < FBO_H; y++) {
             for (int x = 0; x < FBO_W / 2; x++) {
                 float *color = &src_data[(y * FBO_W + x) * 4];
@@ -812,10 +815,18 @@ static void pl_shader_tests(pl_gpu gpu)
                 luma = pl_hdr_rescale(PL_HDR_NORM, PL_HDR_PQ, luma);
                 real_peak = PL_MAX(real_peak, luma);
                 real_avg += luma;
+                const float max_rgb = PL_MAX(powf(color[0], 2.2f),
+                    PL_MAX(powf(color[1], 2.2f), powf(color[2], 2.2f))) * PL_COLOR_SDR_WHITE;
+                crop_scene_avg += max_rgb;
+                crop_scene_max = PL_MAX(crop_scene_max, max_rgb);
                 crop_pixels++;
             }
         }
         real_avg /= crop_pixels;
+        REQUIRE_FEQ(hdr.scene_avg, crop_scene_avg / crop_pixels, 1.0);
+        REQUIRE_FEQ(hdr.scene_max[0], crop_scene_max, 1.0);
+        REQUIRE(hdr.scene_avg < full_scene_avg);
+        REQUIRE(hdr.scene_max[0] <= full_scene_max);
         REQUIRE_FEQ(hdr.max_pq_y, real_peak, 1e-4);
         // The CPU reference omits the small decoded-RGB black-level
         // normalization performed by the shader, which is more visible for
@@ -831,6 +842,41 @@ static void pl_shader_tests(pl_gpu gpu)
     pl_shader_obj_destroy(&peak_state);
     if (getenv("PL_TEST_PEAK_ANALYSIS_CROP_ONLY"))
         goto cleanup;
+
+    // Dynamic target changes compressed HDR output, and toggling back must
+    // restore the same output even when reusing the shader object/LUT cache.
+    {
+        pl_shader_obj tone_state = NULL;
+        struct pl_color_space source = pl_color_space_hdr10;
+        struct pl_color_space target = pl_color_space_hdr10;
+        source.hdr.max_luma = 4000;
+        source.hdr.scene_avg = 500;
+        source.hdr.scene_max[0] = source.hdr.scene_max[1] = source.hdr.scene_max[2] = 4000;
+        target.hdr.max_luma = 100;
+        static float on_data[FBO_H * FBO_W * 4];
+        static float off_data[FBO_H * FBO_W * 4];
+        for (int iteration = 0; iteration < 3; iteration++) {
+            struct pl_color_map_params map = pl_color_map_default_params;
+            map.dynamic_target = iteration != 1;
+            sh = pl_dispatch_begin(dp);
+            pl_shader_sample_nearest(sh, pl_sample_src(.tex = src));
+            pl_shader_color_map(sh, &map, source, target, &tone_state, false);
+            REQUIRE(pl_dispatch_finish(dp, pl_dispatch_params(.shader = &sh, .target = fbo)));
+            REQUIRE(pl_tex_download(gpu, pl_tex_transfer_params(.tex = fbo, .ptr = test_data)));
+            for (int i = 0; i < PL_ARRAY_SIZE(test_data); i++) {
+                REQUIRE(isfinite(test_data[i]));
+                if (iteration == 0) on_data[i] = test_data[i];
+                if (iteration == 1) off_data[i] = test_data[i];
+                if (iteration == 2) REQUIRE_FEQ(test_data[i], on_data[i], 1e-5);
+            }
+        }
+        float difference = 0;
+        for (int i = 0; i < PL_ARRAY_SIZE(test_data); i++)
+            difference = PL_MAX(difference, fabsf(on_data[i] - off_data[i]));
+        REQUIRE(difference > 1e-4f);
+        printf("- dynamic target on/off output difference: %f\n", difference);
+        pl_shader_obj_destroy(&tone_state);
+    }
 
     // Test film grain synthesis
     pl_shader_obj grain = NULL;

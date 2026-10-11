@@ -99,6 +99,16 @@ int main()
     REQUIRE(pl_options_load(test, "cone=yes,cone_preset=deuteranomaly"));
     REQUIRE_STREQ(pl_options_save(test), "cone=yes,cones=m,cone_strength=0.5");
 
+    // VP dynamic target is enabled by default and survives serialization.
+    pl_options_reset(test, NULL);
+    REQUIRE(test->color_map_params.dynamic_target);
+    REQUIRE(pl_options_load(test, "dynamic_target=no"));
+    REQUIRE(!test->color_map_params.dynamic_target);
+    REQUIRE_STREQ(pl_options_save(test), "dynamic_target=no");
+    REQUIRE(pl_options_load(test, "dynamic_target=yes"));
+    REQUIRE(test->color_map_params.dynamic_target);
+    REQUIRE_STREQ(pl_options_save(test), "");
+
     // Test error paths
     pl_options bad = pl_options_alloc(NULL);
     REQUIRE(!pl_options_load(bad, "scale_preset=help"));
