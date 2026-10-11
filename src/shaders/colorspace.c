@@ -16,6 +16,7 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 
 #include "cache.h"
 #include "colorspace.h"
@@ -2508,6 +2509,74 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
              "}                                                        \n",
              SH_FLOAT(black),SH_FLOAT(range),SH_FLOAT(xyz.m[1][0]/sum),
              SH_FLOAT(xyz.m[1][1]/sum),SH_FLOAT(xyz.m[1][2]/sum),0.5f/M_PI,table,table,table,table);
+    }
+
+    // Research-only opt-in: repair residual target-volume overflow after the
+    // original gamut mapping. Keep the original shader byte-for-byte when off.
+    const char *continuous_env = getenv("VP_CONTINUOUS_GAMUT");
+    if (need_tone_map && !params->vp_gamut_compression &&
+        !params->inverse_tone_mapping && continuous_env &&
+        strcmp(continuous_env, "1") == 0)
+    {
+        const struct pl_raw_primaries *signal = pl_raw_primaries_get(dst.primaries);
+        const struct pl_raw_primaries *physical = &dst.hdr.prim;
+        const bool same = pl_raw_primaries_equal(signal, physical);
+        const pl_matrix3x3 xyz = pl_get_rgb2xyz_matrix(physical);
+        const float sum = xyz.m[1][0] + xyz.m[1][1] + xyz.m[1][2];
+        float black, peak;
+        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+            .color = &dst, .metadata = PL_HDR_METADATA_HDR10,
+            .scaling = PL_HDR_NITS, .out_min = &black, .out_max = &peak));
+        if (!(isfinite(black) && black >= 0 && isfinite(peak) && peak > black &&
+              xyz.m[1][0] > 0 && xyz.m[1][1] > 0 && xyz.m[1][2] > 0 &&
+              isfinite(sum)))
+        {
+            SH_FAIL(sh, "Continuous gamut research requires a finite target and positive luminance weights");
+            return;
+        }
+
+        pl_matrix3x3 to_physical = pl_get_xyz2rgb_matrix(physical);
+        const pl_matrix3x3 signal_xyz = pl_get_rgb2xyz_matrix(signal);
+        pl_matrix3x3_mul(&to_physical, &signal_xyz);
+        pl_matrix3x3 to_signal = pl_get_xyz2rgb_matrix(signal);
+        pl_matrix3x3_mul(&to_signal, &xyz);
+        sh_describe(sh, "VP continuous target-volume research");
+        GLSL("{ vec3 physical = color.rgb; \n");
+        if (!same)
+            GLSL("physical = "$" * physical; \n", SH_MAT3(to_physical));
+        GLSL("  float black = "$", span = "$";                         \n"
+             "  vec3 a = (physical - vec3(black)) / span;               \n"
+             "  float m = min(min(min(a.r, a.g), a.b), 0.0);          \n"
+             "  vec3 v = a - vec3(m);                                \n"
+             "  float M = max(max(v.r, v.g), v.b);                    \n"
+             "  float lo = min(min(v.r, v.g), v.b);                   \n"
+             "  float saturation = M > 0.0 ? (M - lo) / M : 0.0;      \n"
+             "  float reserve = 0.02 * saturation;                   \n"
+             "  float q = 1.0 - reserve;                             \n"
+             // Preserve the original signal, avoiding an extra matrix roundtrip
+             // throughout the legal interior (including the entire gray ramp).
+             "  if (m < 0.0 || M > q) {                              \n"
+             "    float over = max(M - q, 0.0);                     \n"
+             "    float den = sqrt(reserve * reserve + over * over); \n"
+             "    float f = den > 0.0 ? over / den : 0.0;           \n"
+             "    float s = M <= q ? M : 1.0 - reserve * (1.0 - f); \n"
+             // This order stays bounded in float32 even when the shoulder
+             // approaches one. A channel clamp is not the gamut operation.
+             "    vec3 b = M > 0.0 ? (v / M) * s : vec3(0.0);      \n"
+             "    vec3 w = vec3("$", "$", "$");                       \n"
+             "    float yin = dot(w, a), yb = dot(w, b);            \n"
+             // The uniform negative-channel lift must never create luminance.
+             "    float cap = yb > 0.0 ? min(1.0, max(yin, 0.0) / yb) : 1.0; \n"
+             "    physical = vec3(black) + span * (b * cap);         \n",
+             SH_FLOAT(black / PL_COLOR_SDR_WHITE),
+             SH_FLOAT((peak - black) / PL_COLOR_SDR_WHITE),
+             SH_FLOAT(xyz.m[1][0] / sum), SH_FLOAT(xyz.m[1][1] / sum),
+             SH_FLOAT(xyz.m[1][2] / sum));
+        if (!same)
+            GLSL("    physical = "$" * physical; \n", SH_MAT3(to_signal));
+        GLSL("    color.rgb = physical; \n"
+             "  } \n"
+             "} \n");
     }
 
     if (params->show_clipping) {
