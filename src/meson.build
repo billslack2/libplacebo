@@ -92,7 +92,6 @@ headers = [
 sources = [
   'cache.c',
   'colorspace.c',
-  'color_volume.c',
   'common.c',
   'compositor.c',
   'convert.cc',
