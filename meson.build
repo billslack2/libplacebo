@@ -12,6 +12,7 @@ project('libplacebo', ['c', 'cpp'],
     7,
     # API version
     {
+      '377': 'VP optional smooth color-volume compression',
       '376': 'VP analysis crop and optional dynamic target',
       '375': 'change pl_source_frame and pl_frame_mix members from float to double',
       '374': 'add pl_color_map_params.mastering_clip',

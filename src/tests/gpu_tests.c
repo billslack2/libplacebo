@@ -878,6 +878,59 @@ static void pl_shader_tests(pl_gpu gpu)
         pl_shader_obj_destroy(&tone_state);
     }
 
+    // VP comparison is opt-in. Original/custom/original must restore exact
+    // output while reusing tone and color-volume LUT state.
+    {
+        pl_shader_obj tone_state = NULL;
+        struct pl_color_space source = pl_color_space_hdr10;
+        struct pl_color_space target = pl_color_space_hdr10;
+        source.hdr.max_luma = 4000;
+        source.hdr.scene_avg = 500;
+        source.hdr.scene_max[0] = source.hdr.scene_max[1] = source.hdr.scene_max[2] = 4000;
+        target.hdr.max_luma = 100;
+        // Exercise feature extraction and contrast recovery in the A/B path.
+        struct pl_tex_params feature_params = fbo->params;
+        feature_params.sampleable = true;
+        pl_tex feature = pl_tex_create(gpu, &feature_params);
+        REQUIRE(feature);
+        sh = pl_dispatch_begin(dp);
+        pl_shader_sample_nearest(sh, pl_sample_src(.tex = src));
+        pl_shader_extract_features(sh, source);
+        REQUIRE(pl_dispatch_finish(dp, pl_dispatch_params(.shader = &sh, .target = feature)));
+        REQUIRE(pl_tex_download(gpu, pl_tex_transfer_params(.tex = feature, .ptr = test_data)));
+        for (int i = 0; i < FBO_H * FBO_W; i++) {
+            REQUIRE(isfinite(test_data[4*i]) && test_data[4*i] >= 0 && test_data[4*i] <= 1);
+            REQUIRE(test_data[4*i+1] == 0 && test_data[4*i+2] == 0);
+        }
+        static float on_data[FBO_H * FBO_W * 4];
+        static float off_data[FBO_H * FBO_W * 4];
+        for (int iteration = 0; iteration < 3; iteration++) {
+            struct pl_color_map_params map = pl_color_map_default_params;
+            map.vp_gamut_compression = iteration == 1;
+            map.contrast_recovery = 0.3f;
+            sh = pl_dispatch_begin(dp);
+            pl_shader_sample_nearest(sh, pl_sample_src(.tex = src));
+            pl_shader_color_map_ex(sh, &map, pl_color_map_args(
+                .src = source, .dst = target, .state = &tone_state,
+                .feature_map = feature));
+            REQUIRE(pl_dispatch_finish(dp, pl_dispatch_params(.shader = &sh, .target = fbo)));
+            REQUIRE(pl_tex_download(gpu, pl_tex_transfer_params(.tex = fbo, .ptr = test_data)));
+            for (int i = 0; i < PL_ARRAY_SIZE(test_data); i++) {
+                REQUIRE(isfinite(test_data[i]));
+                if (iteration == 0) on_data[i] = test_data[i];
+                if (iteration == 1) off_data[i] = test_data[i];
+                if (iteration == 2) REQUIRE(test_data[i] == on_data[i]);
+            }
+        }
+        float difference = 0;
+        for (int i = 0; i < PL_ARRAY_SIZE(test_data); i++)
+            difference = PL_MAX(difference, fabsf(on_data[i] - off_data[i]));
+        REQUIRE(difference > 1e-4f);
+        printf("- VP original/custom output difference: %f\n", difference);
+        pl_shader_obj_destroy(&tone_state);
+        pl_tex_destroy(gpu, &feature);
+    }
+
     // Test film grain synthesis
     pl_shader_obj grain = NULL;
     struct pl_film_grain_params grain_params = {

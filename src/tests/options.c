@@ -109,6 +109,15 @@ int main()
     REQUIRE(test->color_map_params.dynamic_target);
     REQUIRE_STREQ(pl_options_save(test), "");
 
+    // Original master is the default; the VP comparator is independently stored.
+    REQUIRE(!test->color_map_params.vp_gamut_compression);
+    REQUIRE(pl_options_load(test, "vp_gamut_compression=yes"));
+    REQUIRE(test->color_map_params.vp_gamut_compression);
+    REQUIRE_STREQ(pl_options_save(test), "vp_gamut_compression=yes");
+    REQUIRE(pl_options_load(test, "vp_gamut_compression=no"));
+    REQUIRE(!test->color_map_params.vp_gamut_compression);
+    REQUIRE_STREQ(pl_options_save(test), "");
+
     // Test error paths
     pl_options bad = pl_options_alloc(NULL);
     REQUIRE(!pl_options_load(bad, "scale_preset=help"));
