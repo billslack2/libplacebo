@@ -1,10 +1,13 @@
 # VideoProcessor libplacebo fork
 
 Branch: `codex/vp-master-beta` (experimental). Upstream pinned to
-`1dd022687b9ac1dd996855b51433bf770ae76aab` (API 375).
-The VP fork uses API 377 to give its extended structures and DLL a distinct ABI.
+`a83aaeb4e60fdd7ed01619885f4f42bb0ef34eaa` (API 387).
+The VP fork uses API 388 to give its extended structures and DLL a distinct ABI.
 
 VP patches:
+- D3D11 translated subtitle ROI copies use CopySubresourceRegion, preserving
+  the patch shipped in VP beta since 2026-10-19. Exact-pixel and cache
+  regressions are included in the D3D11 test suite.
 - Analysis crop for peak detection, including master scene-average/maxRGB
   measurements used by dynamic target. Excluded pixels do not affect statistics.
 - D3D11 timer allocation and diagnostic suspension controls, recovered from
@@ -57,3 +60,14 @@ meson test -C build-release --print-errorlogs
 GPU tests cover cropped luminance/maxRGB, timer controls, and actual rendered
 HDR output with dynamic target on/off/on (including reused LUT state).
 Scene fixtures and visual gamut qualification are separate from these tests.
+
+## Upstream refresh (2026-10-29)
+
+Rebased on upstream a83aaeb4e60fdd7ed01619885f4f42bb0ef34eaa.
+Includes the gamut LUT range clamp (ed5d8d70) and neutral-chroma offset
+fix (4828f628). Both precede the optional VP residual gamut correction;
+that correction stays disabled by default. API 388 distinguishes the extended
+fork ABI from upstream API 387 and the previous VP API 377.
+
+Consumers must rebuild against the matching API 388 headers/import library and
+ship libplacebo-388.dll. Do not substitute this DLL into an API 377 build.

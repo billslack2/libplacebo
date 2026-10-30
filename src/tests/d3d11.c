@@ -3,6 +3,7 @@
 #include <dxgi1_2.h>
 
 #include <libplacebo/d3d11.h>
+#include "subtitle_roi_copy.h"
 
 int main()
 {
@@ -67,7 +68,9 @@ int main()
         REQUIRE(!pl_timer_create(d3d11->gpu));
         REQUIRE(pl_d3d11_set_timer_queries_enabled(d3d11, true));
 
-        gpu_shader_tests(d3d11->gpu);
+        subtitle_roi_copy_tests(d3d11->gpu);
+        if (!getenv("PL_TEST_SUBTITLE_ROI_COPY_ONLY"))
+            gpu_shader_tests(d3d11->gpu);
 
         pl_d3d11_destroy(&d3d11);
     }

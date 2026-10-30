@@ -582,16 +582,40 @@ void pl_d3d11_tex_blit(pl_gpu gpu, const struct pl_tex_blit_params *params)
     struct pl_tex_d3d11 *dst_p = PL_PRIV(params->dst);
     DXGI_FORMAT dst_fmt = fmt_to_dxgi(params->dst->params.format);
 
-    // If the blit operation doesn't require flipping, scaling or format
-    // conversion, we can use CopySubresourceRegion
+    // Cropping a normal 2D texture into a separate ROI texture is a copy,
+    // even when the source and destination origins differ. The compute blit
+    // embeds ROI coordinates in GLSL, causing a new shader for each geometry.
     pl_rect3d src_rc = params->src_rc, dst_rc = params->dst_rc;
-    if (pl_rect3d_eq(src_rc, dst_rc) && src_fmt == dst_fmt) {
-        pl_rect3d rc = params->src_rc;
-        pl_rect3d_normalize(&rc);
+    bool translated_copy = false;
+    if (!pl_rect3d_eq(src_rc, dst_rc) && src_fmt == dst_fmt && src_p->tex2d && dst_p->tex2d &&
+        src_p->res != dst_p->res &&
+        src_p->array_slice < 0 && dst_p->array_slice < 0 &&
+        !params->src->params.format->emulated &&
+        !params->dst->params.format->emulated &&
+        src_rc.z0 == 0 && dst_rc.z0 == 0 && src_rc.z1 == 1 && dst_rc.z1 == 1 &&
+        pl_rect_w(src_rc) > 0 && pl_rect_h(src_rc) > 0 &&
+        pl_rect_w(src_rc) == pl_rect_w(dst_rc) &&
+        pl_rect_h(src_rc) == pl_rect_h(dst_rc)) {
+        D3D11_TEXTURE2D_DESC src_desc, dst_desc;
+        ID3D11Texture2D_GetDesc(src_p->tex2d, &src_desc);
+        ID3D11Texture2D_GetDesc(dst_p->tex2d, &dst_desc);
+        // Keep reinterpreted/planar views and unusual resources on the old
+        // path. Public pl_tex_blit has already validated both rectangle bounds.
+        translated_copy = src_desc.Format == src_fmt && dst_desc.Format == dst_fmt &&
+            src_desc.SampleDesc.Count == 1 && dst_desc.SampleDesc.Count == 1 &&
+            src_desc.Width == params->src->params.w &&
+            src_desc.Height == params->src->params.h &&
+            dst_desc.Width == params->dst->params.w &&
+            dst_desc.Height == params->dst->params.h &&
+            dst_desc.Usage == D3D11_USAGE_DEFAULT;
+    }
+    if ((pl_rect3d_eq(src_rc, dst_rc) || translated_copy) && src_fmt == dst_fmt) {
+        pl_rect3d_normalize(&src_rc);
+        pl_rect3d_normalize(&dst_rc);
 
         ID3D11DeviceContext_CopySubresourceRegion(p->imm, dst_p->res,
-            tex_subresource(params->dst), rc.x0, rc.y0, rc.z0, src_p->res,
-            tex_subresource(params->src), &pl_rect3d_to_box(rc));
+            tex_subresource(params->dst), dst_rc.x0, dst_rc.y0, dst_rc.z0, src_p->res,
+            tex_subresource(params->src), &pl_rect3d_to_box(src_rc));
     } else if (p->fl >= D3D_FEATURE_LEVEL_11_0) {
         if (!pl_tex_blit_compute(gpu, params))
             PL_ERR(gpu, "Failed compute shader fallback blit");
