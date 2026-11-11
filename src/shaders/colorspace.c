@@ -1283,7 +1283,7 @@ static void update_peak_buf(pl_gpu gpu, struct sh_color_map_obj *obj, bool force
         avg_pq = (float) frame_sum_pq / (frame_wg_active * PQ_MAX);
         max_pq = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_PQ, 10000.0f *
                                 frame_max_rgb / (float) LIN_MAX);
-        max_pq = measure_peak(&data, params->percentile, max_pq);
+        max_pq = PL_MIN(measure_peak(&data, params->percentile, max_pq), max_pq);
         scene_max_pq = max_pq;
     } else {
         // Solid black frame
